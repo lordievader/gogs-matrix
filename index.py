@@ -182,7 +182,6 @@ if __name__ == '__main__':
     FORMAT = '%(asctime)-15s %(funcName)-15s: %(message)s'
     logging.basicConfig(format=FORMAT, level='DEBUG')
     with open('config.yaml', 'r') as yaml_file:
-        import pdb; pdb.set_trace() # BREAKPOINT
         CONFIG = yaml.load(yaml_file)
 
     app.run(host='0.0.0.0')
