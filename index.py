@@ -11,33 +11,39 @@ from flask import Flask, request
 import matrix
 
 app = Flask(__name__)
+issue_filter = ['created', 'label_updated']
 
 
 def send_message(room, message):
     config = matrix.read_config('/etc/matrix.conf')
-    config['message'] = message.replace('\n', '<br />')
+    config['message'] = message # .replace('\n', '<br />')
     config['room'] = room
     client, room = matrix.setup(config)
     matrix.send_message(config, room)
 
 
-def commit(commit_data):
+def commit(data):
+    """Parses commit messages from the webhook.
+
+    :param data: json input data
+    :type data: dict
+    :return: list of messages
+    """
     messages = []
-    for commit in commit_data:
+    ref = data['ref']
+    for commit in data['commits']:
         commit_id = commit['id']
         date = commit['timestamp']
-        url = commit['url']
         author = commit['author']['name']
         committer = commit['committer']['name']
         message = commit['message']
         return_message = (
-            'commit {commit_id}\n'
-            'URL: {url}\n'
+            'commit {commit_id} onto {ref}\n'
             'Author: {author} ({committer})\n'
             'Date: {date}\n\n'
             '{message}').format(
+                ref=ref,
                 commit_id=commit_id,
-                url=url,
                 author=author,
                 committer=committer,
                 date=date,
@@ -48,15 +54,23 @@ def commit(commit_data):
     return messages
 
 
-def pull_request(number, action, pull_data):
+def pull_request(data):
+    """Handles pull request events.
+
+    :param data: input json data
+    :type data: dict
+    :return: list of messages
+    """
     messages = []
-    user = pull_data['user']['full_name']
-    title = pull_data['title']
-    body = pull_data['body']
-    head_branch = pull_data['head_branch']
-    base_branch = pull_data['base_branch']
-    url = pull_data['html_url']
-    mergeable = str(pull_data['mergeable'])
+    number = data['number']
+    action = data['action']
+    user = data['sender']['full_name']
+    title = data['pull_request']['title']
+    body = data['pull_request']['body']
+    head_branch = data['pull_request']['head_branch']
+    base_branch = data['pull_request']['base_branch']
+    url = data['pull_request']['html_url']
+    mergeable = str(data['pull_request']['mergeable'])
     if action == 'opened' or action == 'reopened':
         message = (
             '{user} wants to merge "{head_branch}" into "{base_branch}" '
@@ -96,44 +110,88 @@ def pull_request(number, action, pull_data):
     return messages
 
 
-def comment(action, comment_data):
+def comment(data):
+    """Handles comment events.
+
+    :param data: the json webhook data
+    :return: messages
+    """
     messages = []
-    url = comment_data['html_url']
-    user = comment_data['user']['full_name']
-    body = comment_data['body']
-    message = (
-        '{user} {action} a comment\n'
-        'URL: {url}\n\n'
-        '{body}'
-    ).format(
-        user=user,
-        action=action,
-        url=url,
-        body=body
-    )
+    action = data['action']
+    url = data['comment']['html_url']
+    user = data['sender']['full_name']
+    body = data['comment']['body']
+    if action == 'deleted':
+        message = (
+            '{user} {action} a comment\n'
+            'URL: {url}\n'
+        ).format(
+            user=user,
+            action=action,
+            url=url
+        )
+
+    else:
+        message = (
+            '{user} {action} a comment\n'
+            'URL: {url}\n\n'
+            '{body}\n'
+        ).format(
+            user=user,
+            action=action,
+            url=url,
+            body=body
+        )
+
     messages.append(message)
     return messages
 
 
-def issue(html_url, action, issue_data):
+def issue(data):
+    """Handles issue events.
+
+    :param data: the json webhook data
+    :return: messages
+    """
     messages = []
-    title = issue_data['title']
-    body = issue_data['body']
-    user = issue_data['user']['full_name']
-    issue_id = issue_data['number']
+    action = data['action']
+    html_url = data['repository']['html_url']
+    title = data['issue']['title']
+    body = data['issue']['body']
+    user = data['sender']['full_name']
+    issue_id = data['issue']['number']
     full_url = '{0}/issues/{1}'.format(html_url, issue_id)
-    message = (
-        '{user} {action} an issue\n'
-        'URL: {full_url}\n\n'
-        '{title}\n'
-        '{body}'
-    ).format(
-        user=user,
-        action=action,
-        full_url=full_url,
-        title=title,
-        body=body
-    )
+
+    if action == 'label_cleared':
+        action = 'cleared the labels of'
+
+    elif action == 'label_updated':
+        action = 'updated the labels of'
+
+    if action == 'opened':
+        message = (
+            '{user} {action} an issue\n'
+            'URL: {full_url}\n\n'
+            '{title}\n'
+            '{body}\n'
+        ).format(
+            user=user,
+            action=action,
+            full_url=full_url,
+            title=title,
+            body=body
+        )
+
+    else:
+        message = (
+            '{user} {action} an issue\n'
+            'URL: {full_url}\n'
+        ).format(
+            user=user,
+            action=action,
+            full_url=full_url,
+        )
+
     messages.append(message)
     return messages
 
@@ -151,26 +209,17 @@ def git(path):
             json_data = request.get_json()
             logging.debug("incoming data: %s", json_data)
             if 'commits' in json_data.keys():
-                commit_data = json_data['commits']
-                messages.extend(commit(commit_data))
+                messages.extend(commit(json_data))
 
             if 'pull_request' in json_data.keys():
-                number = json_data['number']
-                action = json_data['action']
-                pull_data = json_data['pull_request']
-                messages.extend(pull_request(number, action, pull_data))
+                messages.extend(pull_request(json_data))
 
             if 'comment' in json_data.keys():
-                action = json_data['action']
-                comment_data = json_data['comment']
-                messages.extend(comment(action, comment_data))
+                messages.extend(comment(json_data))
 
             if ('issue' in json_data.keys()
-                    and json_data['action'] != 'label_updated'):
-                html_url = json_data['repository']['html_url']
-                action = json_data['action']
-                issue_data = json_data['issue']
-                messages.extend(issue(html_url, action, issue_data))
+                    and 'comment' not in json_data.keys()):
+                messages.extend(issue(json_data))
 
     return_message = "\n\n".join(messages)
     logging.debug(return_message)
